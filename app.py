@@ -1,6 +1,6 @@
 import math
 import streamlit as st
-from tabulate import tabulate
+import pandas as pd
 
 # ---------------------------------------------------------
 # Funciones auxiliares
@@ -44,7 +44,7 @@ def temperaturas(material, reciclado, carga):
 # ---------------------------------------------------------
 
 st.title("🧠 Calculadora de Parámetros Iniciales de Inyección")
-st.write("Versión optimizada para Android vía navegador")
+st.write("Optimizada para Android vía navegador. Agrega esta página a tu pantalla de inicio para usarla como app.")
 
 st.header("1. Material")
 material = st.selectbox("Tipo de material", ["PP", "PEAD", "Mezcla PP/PE"])
@@ -113,5 +113,6 @@ if st.button("Calcular parámetros"):
         ["Tiempo de ciclo total", f"{t_ciclo} s"],
     ]
 
+    df = pd.DataFrame(tabla, columns=["Parámetro", "Valor"])
     st.subheader("Resultados")
-    st.table(tabla)
+    st.dataframe(df, use_container_width=True)
