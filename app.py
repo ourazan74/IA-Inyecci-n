@@ -28,8 +28,8 @@ def calcular_tonelaje(area_cm2, presion_cavidad=450):
         return 0.0
 
 
-def calcular_tiempos(peso_g, espesor_mm):
-    """Tiempos térmicos estimados."""
+def calcular_tiempos_base(peso_g, espesor_mm):
+    """Tiempos térmicos base (antes de ajustes por geometría)."""
     try:
         t_iny = round(0.008 * float(peso_g) + 0.5, 2)
         t_sost = round(0.6 * float(espesor_mm)**2 + 0.3 * float(espesor_mm), 2)
@@ -77,6 +77,9 @@ cavidades = st.number_input("Número de cavidades", min_value=1)
 
 geo = st.selectbox("Geometría principal", ["Rectangular", "Cilíndrica", "Irregular"])
 
+altura = None
+diametro = None
+
 if geo == "Rectangular":
     largo = st.number_input("Largo (mm)", min_value=0.1)
     ancho = st.number_input("Ancho (mm)", min_value=0.1)
@@ -84,6 +87,7 @@ if geo == "Rectangular":
 
 elif geo == "Cilíndrica":
     diametro = st.number_input("Diámetro (mm)", min_value=0.1)
+    altura = st.number_input("Altura (mm)", min_value=0.1)
     area = calcular_area_proyectada("Cilíndrica", diametro=diametro)
 
 else:
@@ -110,16 +114,53 @@ tiempo_expulsion = st.number_input("Tiempo de expulsión (s)", value=1.0, min_va
 
 if st.button("Calcular parámetros"):
 
+    # -------- Tonelaje y uso de husillo --------
     tonelaje_req = round(calcular_tonelaje(area_total), 2)
     uso_husillo = round((float(peso_total) / float(cap_inyeccion)) * 100.0, 1)
 
-    t_iny, t_sost, t_enf = calcular_tiempos(peso_total, espesor)
+    # -------- Tiempos base --------
+    t_iny, t_sost_base, t_enf_base = calcular_tiempos_base(peso_total, espesor)
+    t_sost = t_sost_base
+    t_enf = t_enf_base
+
+    alertas = []
+
+    # -------- Ajustes por relación altura/diámetro (solo cilíndrica) --------
+    if geo == "Cilíndrica" and diametro and altura:
+        relacion_hd = float(altura) / float(diametro)
+
+        # Ajuste de sostenimiento según altura/diámetro
+        # A mayor relación, más tiempo de sostenimiento para evitar colapso interno
+        factor_sost = 1.0 + 0.05 * max(relacion_hd - 1.0, 0)   # +5% por cada unidad sobre 1
+        factor_sost = min(factor_sost, 1.5)                    # Máx +50%
+        t_sost = round(t_sost_base * factor_sost, 2)
+
+        # Ajuste de enfriamiento según altura/diámetro
+        factor_enf = 1.0 + 0.1 * max(relacion_hd - 1.0, 0)     # +10% por cada unidad sobre 1
+        factor_enf = min(factor_enf, 2.0)                      # Máx x2
+        t_enf = round(t_enf_base * factor_enf, 2)
+
+        # Riesgo de deformación (pieza muy esbelta)
+        if relacion_hd >= 3.0:
+            alertas.append(
+                f"Pieza cilíndrica esbelta (h/D = {relacion_hd:.2f}). Riesgo de deformación, recomienda refuerzo en sostenimiento y enfriamiento."
+            )
+
+        # Riesgo de colapso en paredes delgadas
+        if relacion_hd >= 4.0 and espesor <= 1.0:
+            alertas.append(
+                f"Relación h/D = {relacion_hd:.2f} con espesor {espesor} mm. Alto riesgo de colapso en paredes delgadas."
+            )
+
+    # -------- Tiempos mecánicos y ciclo total --------
     t_mecanico = float(tiempo_cierre) + float(tiempo_apertura) + float(tiempo_expulsion)
     t_ciclo = round(t_iny + t_sost + t_enf + t_mecanico, 2)
 
+    # -------- Temperaturas --------
     zona_post, zona_trans, zona_ant, boquilla = temperaturas(material, reciclado, carga)
     temp_molde = "20–30 °C (frío) / 30–40 °C (templado)"
 
+    # -------- Tabla de resultados --------
     tabla = [
         ["Temperatura zona posterior", f"{zona_post} °C"],
         ["Temperatura zona transición", f"{zona_trans} °C"],
@@ -131,8 +172,8 @@ if st.button("Calcular parámetros"):
         ["Tonelaje disponible", f"{tonelaje_maquina} t"],
         ["Uso del husillo", f"{uso_husillo} %"],
         ["Tiempo de inyección", f"{t_iny} s"],
-        ["Tiempo de sostenimiento", f"{t_sost} s"],
-        ["Tiempo de enfriamiento", f"{t_enf} s"],
+        ["Tiempo de sostenimiento (ajustado)", f"{t_sost} s"],
+        ["Tiempo de enfriamiento (ajustado)", f"{t_enf} s"],
         ["Tiempo cierre", f"{tiempo_cierre} s"],
         ["Tiempo apertura", f"{tiempo_apertura} s"],
         ["Tiempo expulsión", f"{tiempo_expulsion} s"],
@@ -142,3 +183,11 @@ if st.button("Calcular parámetros"):
     df = pd.DataFrame(tabla, columns=["Parámetro", "Valor"])
     st.subheader("Resultados")
     st.dataframe(df, use_container_width=True)
+
+    # -------- Alertas de proceso --------
+    if alertas:
+        st.subheader("Alertas de proceso")
+        for a in alertas:
+            st.warning(a)
+    else:
+        st.info("Sin alertas críticas según los parámetros ingresados.")
