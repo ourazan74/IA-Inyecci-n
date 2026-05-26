@@ -1,21 +1,68 @@
 import math
 import streamlit as st
 import pandas as pd
+import numpy as np
+from PIL import Image
 
 # ---------------------------------------------------------
 # Funciones auxiliares
 # ---------------------------------------------------------
 
 def calcular_area_proyectada(tipo, largo=None, ancho=None, diametro=None, area_manual=None):
-    """Calcula el área proyectada en cm² según la geometría."""
+    """Calcula el área proyectada en cm² según la geometría básica."""
     try:
         if tipo == "Rectangular":
-            return float(largo) * float(ancho) / 100.0
+            return float(largo) * float(ancho) / 100.0  # mm² → cm²
         elif tipo == "Cilíndrica":
             radio = float(diametro) / 2.0
-            return (math.pi * radio * radio) / 100.0
+            return (math.pi * radio * radio) / 100.0    # mm² → cm²
         else:
             return float(area_manual)
+    except:
+        return 0.0
+
+
+def calcular_area_irregular_desde_imagen(largo_max_mm, ancho_max_mm, imagen):
+    """
+    Calcula un área proyectada aproximada en cm² para figura irregular
+    usando:
+      - largo máximo real (mm)
+      - ancho máximo real (mm)
+      - foto de la pieza o cavidad
+    """
+    try:
+        img = Image.open(imagen).convert("L")  # escala de grises
+        arr = np.array(img)
+
+        # Umbral simple: asumimos pieza más oscura que el fondo
+        thresh = np.mean(arr)
+        mask = arr < thresh  # True donde está la pieza
+
+        # Si no se detecta nada, devolvemos 0
+        if not np.any(mask):
+            return 0.0
+
+        # Bounding box de la pieza en píxeles
+        ys, xs = np.where(mask)
+        min_x, max_x = xs.min(), xs.max()
+        min_y, max_y = ys.min(), ys.max()
+
+        width_px = max_x - min_x + 1
+        height_px = max_y - min_y + 1
+
+        # Escala en mm/px según largo y ancho máximos reales
+        mm_per_px_x = float(largo_max_mm) / float(width_px)
+        mm_per_px_y = float(ancho_max_mm) / float(height_px)
+
+        # Área en píxeles de la pieza
+        pixel_count = mask.sum()
+
+        # Área real en mm²
+        area_mm2 = pixel_count * mm_per_px_x * mm_per_px_y
+
+        # Convertimos a cm²
+        area_cm2 = area_mm2 / 100.0
+        return area_cm2
     except:
         return 0.0
 
@@ -77,22 +124,37 @@ cavidades = st.number_input("Número de cavidades", min_value=1)
 
 geo = st.selectbox("Geometría principal", ["Rectangular", "Cilíndrica", "Irregular"])
 
-altura = None
+altura_pieza = None
 diametro = None
 
 if geo == "Rectangular":
     largo = st.number_input("Largo (mm)", min_value=0.1)
     ancho = st.number_input("Ancho (mm)", min_value=0.1)
+    altura_pieza = st.number_input("Altura (mm)", min_value=0.1)
     area = calcular_area_proyectada("Rectangular", largo=largo, ancho=ancho)
 
 elif geo == "Cilíndrica":
     diametro = st.number_input("Diámetro (mm)", min_value=0.1)
-    altura = st.number_input("Altura (mm)", min_value=0.1)
+    altura_pieza = st.number_input("Altura (mm)", min_value=0.1)
     area = calcular_area_proyectada("Cilíndrica", diametro=diametro)
 
-else:
-    area_manual = st.number_input("Área proyectada (cm²)", min_value=0.1)
-    area = calcular_area_proyectada("Irregular", area_manual=area_manual)
+else:  # Irregular
+    st.markdown("### Datos para figura irregular")
+    largo_max = st.number_input("Largo máximo (mm)", min_value=0.1)
+    ancho_max = st.number_input("Ancho máximo (mm)", min_value=0.1)
+    altura_pieza = st.number_input("Altura (mm)", min_value=0.1)
+
+    imagen = st.file_uploader("Sube una foto de la pieza o cavidad (vista superior)", type=["png", "jpg", "jpeg"])
+
+    area = 0.0
+    if imagen is not None and largo_max > 0 and ancho_max > 0:
+        st.info("Calculando área proyectada aproximada a partir de la imagen…")
+        area = calcular_area_irregular_desde_imagen(largo_max, ancho_max, imagen)
+        st.write(f"Área proyectada estimada desde imagen: **{area:.2f} cm²**")
+    else:
+        st.warning("Si no subes imagen, ingresa un valor manual de área proyectada.")
+        area_manual = st.number_input("Área proyectada manual (cm²)", min_value=0.1)
+        area = calcular_area_proyectada("Irregular", area_manual=area_manual)
 
 area_total = float(area) * float(cavidades)
 
@@ -114,6 +176,8 @@ tiempo_expulsion = st.number_input("Tiempo de expulsión (s)", value=1.0, min_va
 
 if st.button("Calcular parámetros"):
 
+    alertas = []
+
     # -------- Tonelaje y uso de husillo --------
     tonelaje_req = round(calcular_tonelaje(area_total), 2)
     uso_husillo = round((float(peso_total) / float(cap_inyeccion)) * 100.0, 1)
@@ -123,33 +187,51 @@ if st.button("Calcular parámetros"):
     t_sost = t_sost_base
     t_enf = t_enf_base
 
-    alertas = []
+    # -------- Ajustes por relación altura/espesor (h/e) --------
+    if altura_pieza is not None and espesor > 0:
+        relacion_he = float(altura_pieza) / float(espesor)
 
-    # -------- Ajustes por relación altura/diámetro (solo cilíndrica) --------
-    if geo == "Cilíndrica" and diametro and altura:
-        relacion_hd = float(altura) / float(diametro)
+        # Ajuste de sostenimiento según h/e
+        factor_sost_he = 1.0 + 0.03 * max(relacion_he - 5.0, 0)  # a partir de h/e > 5
+        factor_sost_he = min(factor_sost_he, 1.5)                # máx +50%
+        t_sost = round(t_sost * factor_sost_he, 2)
 
-        # Ajuste de sostenimiento según altura/diámetro
-        # A mayor relación, más tiempo de sostenimiento para evitar colapso interno
-        factor_sost = 1.0 + 0.05 * max(relacion_hd - 1.0, 0)   # +5% por cada unidad sobre 1
-        factor_sost = min(factor_sost, 1.5)                    # Máx +50%
-        t_sost = round(t_sost_base * factor_sost, 2)
+        # Ajuste de enfriamiento según h/e
+        factor_enf_he = 1.0 + 0.05 * max(relacion_he - 5.0, 0)
+        factor_enf_he = min(factor_enf_he, 2.0)                  # máx x2
+        t_enf = round(t_enf * factor_enf_he, 2)
 
-        # Ajuste de enfriamiento según altura/diámetro
-        factor_enf = 1.0 + 0.1 * max(relacion_hd - 1.0, 0)     # +10% por cada unidad sobre 1
-        factor_enf = min(factor_enf, 2.0)                      # Máx x2
-        t_enf = round(t_enf_base * factor_enf, 2)
-
-        # Riesgo de deformación (pieza muy esbelta)
-        if relacion_hd >= 3.0:
+        # Riesgos por h/e
+        if relacion_he >= 20:
             alertas.append(
-                f"Pieza cilíndrica esbelta (h/D = {relacion_hd:.2f}). Riesgo de deformación, recomienda refuerzo en sostenimiento y enfriamiento."
+                f"Relación altura/espesor h/e = {relacion_he:.1f}. Riesgo de deformación (pieza muy esbelta)."
+            )
+        if relacion_he >= 30 and espesor <= 1.0:
+            alertas.append(
+                f"h/e = {relacion_he:.1f} con espesor {espesor} mm. Alto riesgo de colapso en paredes delgadas."
             )
 
-        # Riesgo de colapso en paredes delgadas
+    # -------- Ajustes adicionales para cilíndricas (h/D) --------
+    if geo == "Cilíndrica" and diametro is not None and altura_pieza is not None and diametro > 0:
+        relacion_hd = float(altura_pieza) / float(diametro)
+
+        # Ajuste extra de sostenimiento por h/D
+        factor_sost_hd = 1.0 + 0.05 * max(relacion_hd - 1.0, 0)
+        factor_sost_hd = min(factor_sost_hd, 1.5)
+        t_sost = round(t_sost * factor_sost_hd, 2)
+
+        # Ajuste extra de enfriamiento por h/D
+        factor_enf_hd = 1.0 + 0.1 * max(relacion_hd - 1.0, 0)
+        factor_enf_hd = min(factor_enf_hd, 2.0)
+        t_enf = round(t_enf * factor_enf_hd, 2)
+
+        if relacion_hd >= 3.0:
+            alertas.append(
+                f"Pieza cilíndrica esbelta (h/D = {relacion_hd:.2f}). Riesgo de deformación, refuerce sostenimiento y enfriamiento."
+            )
         if relacion_hd >= 4.0 and espesor <= 1.0:
             alertas.append(
-                f"Relación h/D = {relacion_hd:.2f} con espesor {espesor} mm. Alto riesgo de colapso en paredes delgadas."
+                f"h/D = {relacion_hd:.2f} con espesor {espesor} mm. Alto riesgo de colapso en paredes delgadas."
             )
 
     # -------- Tiempos mecánicos y ciclo total --------
@@ -185,8 +267,8 @@ if st.button("Calcular parámetros"):
     st.dataframe(df, use_container_width=True)
 
     # -------- Alertas de proceso --------
+    st.subheader("Alertas de proceso")
     if alertas:
-        st.subheader("Alertas de proceso")
         for a in alertas:
             st.warning(a)
     else:
